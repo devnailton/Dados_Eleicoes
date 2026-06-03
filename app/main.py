@@ -22,7 +22,8 @@ st.set_page_config(
 
 COLOR_SEQUENCE = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#f97316"]
 FILTER_CONTEXT_KEY = "filter_context"
-QUERY_SELECTION_SIGNATURE_KEY = "query_selection_signature"
+LAST_APPLIED_QUERY_SIGNATURE_KEY = "last_applied_query_signature"
+LAST_WRITTEN_QUERY_SIGNATURE_KEY = "last_written_query_signature"
 SELECTED_CITIES_KEY = "selected_cities"
 SELECTED_CANDIDATES_KEY = "selected_candidates"
 QUERY_YEAR_KEY = "ano"
@@ -130,6 +131,14 @@ def main() -> None:
             candidate_options,
             default_cities=query_cities,
             default_candidates=query_candidates,
+            query_signature=_build_query_signature(
+                year,
+                state,
+                turn,
+                selected_position,
+                query_cities,
+                query_candidates,
+            ),
         )
         _prune_session_selection(SELECTED_CITIES_KEY, city_options)
         selected_cities = st.multiselect(
@@ -369,16 +378,20 @@ def _sync_filter_state(
     candidate_options: list[str],
     default_cities: list[str],
     default_candidates: list[str],
+    query_signature: tuple[object, ...],
 ) -> None:
-    query_selection_signature = (tuple(default_cities), tuple(default_candidates))
-    if (
-        st.session_state.get(FILTER_CONTEXT_KEY) == filter_context
-        and st.session_state.get(QUERY_SELECTION_SIGNATURE_KEY) == query_selection_signature
-    ):
+    context_changed = st.session_state.get(FILTER_CONTEXT_KEY) != filter_context
+    external_query_changed = _external_query_changed(query_signature)
+
+    if not context_changed and not external_query_changed:
         return
 
+    if context_changed and not external_query_changed:
+        default_cities = []
+        default_candidates = []
+
     st.session_state[FILTER_CONTEXT_KEY] = filter_context
-    st.session_state[QUERY_SELECTION_SIGNATURE_KEY] = query_selection_signature
+    st.session_state[LAST_APPLIED_QUERY_SIGNATURE_KEY] = query_signature
     st.session_state[SELECTED_CITIES_KEY] = default_cities
     st.session_state[SELECTED_CANDIDATES_KEY] = default_candidates or _top_candidates(
         state_data,
@@ -437,8 +450,19 @@ def _update_filter_query_params(
         QUERY_CITIES_KEY: selected_cities,
         QUERY_CANDIDATES_KEY: selected_candidates,
     }
+    expected_signature = _build_query_signature(
+        year,
+        state,
+        turn,
+        position,
+        selected_cities,
+        selected_candidates,
+    )
+
+    st.session_state[LAST_WRITTEN_QUERY_SIGNATURE_KEY] = expected_signature
 
     if _query_params_match(expected_params):
+        st.session_state[LAST_APPLIED_QUERY_SIGNATURE_KEY] = expected_signature
         return
 
     st.query_params.update(expected_params)
@@ -452,6 +476,31 @@ def _query_params_match(expected_params: dict[str, str | list[str]]) -> bool:
             return False
 
     return True
+
+
+def _external_query_changed(query_signature: tuple[object, ...]) -> bool:
+    return query_signature not in {
+        st.session_state.get(LAST_APPLIED_QUERY_SIGNATURE_KEY),
+        st.session_state.get(LAST_WRITTEN_QUERY_SIGNATURE_KEY),
+    }
+
+
+def _build_query_signature(
+    year: int,
+    state: str,
+    turn: int,
+    position: str,
+    selected_cities: list[str],
+    selected_candidates: list[str],
+) -> tuple[object, ...]:
+    return (
+        year,
+        state,
+        turn,
+        position,
+        tuple(selected_cities),
+        tuple(selected_candidates),
+    )
 
 
 def _parse_int(value: object) -> int | None:
