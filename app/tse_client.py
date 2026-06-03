@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import zipfile
@@ -18,6 +19,11 @@ TSE_DATASET_URL = "https://dadosabertos.tse.jus.br/dataset/resultados-{year}-bol
 CACHE_DIR = Path("data/cache/tse")
 DOWNLOAD_DIR = CACHE_DIR / "downloads"
 AGGREGATED_DIR = CACHE_DIR / "aggregated"
+OVERWRITE_EXISTING_FILES = os.getenv("TSE_OVERWRITE_EXISTING_FILES", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 SUPPORTED_YEARS = (2024, 2022, 2020, 2018)
 BRAZILIAN_UFS = (
@@ -193,9 +199,10 @@ def _download_resource(resource: TSEBUResource) -> Path:
         file_name = f"bweb_{resource.turn}t_{resource.uf}_{resource.year}.zip"
 
     target = DOWNLOAD_DIR / file_name
-    if target.exists() and target.stat().st_size > 0:
+    if not OVERWRITE_EXISTING_FILES and target.exists() and target.stat().st_size > 0:
         return target
 
+    temp_path: Path | None = None
     try:
         with requests.get(resource.url, stream=True, timeout=(15, 180)) as response:
             response.raise_for_status()
@@ -207,6 +214,8 @@ def _download_resource(resource: TSEBUResource) -> Path:
                     if chunk:
                         tmp_file.write(chunk)
     except requests.RequestException as error:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
         raise TSEClientError(f"Falha ao baixar o boletim de urna do TSE: {error}") from error
 
     if expected_size and temp_path.stat().st_size != expected_size:
@@ -221,7 +230,7 @@ def _aggregate_bu_zip(zip_path: Path, resource: TSEBUResource) -> pd.DataFrame:
     AGGREGATED_DIR.mkdir(parents=True, exist_ok=True)
     aggregated_path = AGGREGATED_DIR / f"votos_{resource.year}_{resource.turn}t_{resource.uf}.csv"
 
-    if aggregated_path.exists() and aggregated_path.stat().st_size > 0:
+    if not OVERWRITE_EXISTING_FILES and aggregated_path.exists() and aggregated_path.stat().st_size > 0:
         return pd.read_csv(aggregated_path)
 
     with zipfile.ZipFile(zip_path) as zipped_file:
@@ -260,7 +269,18 @@ def _aggregate_bu_zip(zip_path: Path, resource: TSEBUResource) -> pd.DataFrame:
         .sort_values(["cargo", "cidade", "votos"], ascending=[True, True, False])
     )
 
-    data.to_csv(aggregated_path, index=False, encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        dir=AGGREGATED_DIR,
+        suffix=".csv",
+        mode="w",
+        encoding="utf-8",
+        newline="",
+    ) as tmp_file:
+        temp_path = Path(tmp_file.name)
+        data.to_csv(tmp_file, index=False)
+
+    temp_path.replace(aggregated_path)
     return data
 
 

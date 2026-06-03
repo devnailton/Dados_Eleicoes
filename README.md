@@ -14,7 +14,7 @@ Sistema Web em Python com Streamlit para consultar boletins de urna oficiais do 
 - Grafico de barras com uma cor diferente para cada deputado/candidato.
 - Exportacao do relatorio filtrado em PDF com totais nas barras e nas tabelas.
 - Tabela com os votos calculados a partir dos boletins de urna.
-- Cache local dos ZIPs e dados agregados para evitar downloads repetidos.
+- Substituicao automatica dos arquivos existentes de dados baixados/agregados.
 - Execucao local via Docker.
 
 ## Como rodar com Docker
@@ -65,6 +65,14 @@ data/cache/tse/
 ```
 
 Essa pasta e ignorada pelo Git.
+
+Por padrao, quando uma combinacao de ano, estado e turno e carregada, o sistema substitui os arquivos existentes em disco. Isso evita que um deploy no Render use dados antigos de um disco persistente.
+
+Para reaproveitar arquivos ja existentes em disco, configure:
+
+```text
+TSE_OVERWRITE_EXISTING_FILES=false
+```
 
 ## Estrutura
 
