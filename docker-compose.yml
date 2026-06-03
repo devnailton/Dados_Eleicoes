@@ -1,0 +1,10 @@
+services:
+  eleicoes:
+    build: .
+    container_name: dados-eleicoes
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    environment:
+      STREAMLIT_SERVER_HEADLESS: "true"
