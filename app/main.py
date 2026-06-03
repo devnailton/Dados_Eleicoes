@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from report import build_pdf_report
@@ -21,17 +22,22 @@ st.set_page_config(
 )
 
 COLOR_SEQUENCE = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#f97316"]
+PROJECTION_COLOR = "#f97316"
 FILTER_CONTEXT_KEY = "filter_context"
 LAST_APPLIED_QUERY_SIGNATURE_KEY = "last_applied_query_signature"
 LAST_WRITTEN_QUERY_SIGNATURE_KEY = "last_written_query_signature"
 SELECTED_CITIES_KEY = "selected_cities"
 SELECTED_CANDIDATES_KEY = "selected_candidates"
+PROJECTION_INPUT_KEY = "projection_input"
+PROJECTION_PERCENT_KEY = "projection_percent"
+LAST_WRITTEN_PROJECTION_QUERY_KEY = "last_written_projection_query"
 QUERY_YEAR_KEY = "ano"
 QUERY_STATE_KEY = "estado"
 QUERY_TURN_KEY = "turno"
 QUERY_POSITION_KEY = "cargo"
 QUERY_CITIES_KEY = "cidades"
 QUERY_CANDIDATES_KEY = "candidatos"
+QUERY_PROJECTION_KEY = "projecao"
 
 
 @st.cache_data(show_spinner=False)
@@ -58,6 +64,7 @@ def main() -> None:
     apply_theme()
     st.title("Dados de Eleicoes")
     query_filters = _read_query_filters()
+    _sync_projection_state(query_filters["projection"])
 
     with st.sidebar:
         st.header("Filtros")
@@ -161,6 +168,7 @@ def main() -> None:
             max_selections=5,
             placeholder="Selecione ate 5 candidatos",
         )
+        projection_percent = render_projection_controls()
 
     _update_filter_query_params(
         year=year,
@@ -169,6 +177,7 @@ def main() -> None:
         position=selected_position,
         selected_cities=selected_cities,
         selected_candidates=selected_candidates,
+        projection_percent=projection_percent,
     )
 
     if not selected_candidates:
@@ -181,14 +190,31 @@ def main() -> None:
         comparison_data,
         selected_candidates,
     )
+    projected_total_by_candidate = _build_projection_totals(
+        total_by_candidate,
+        projection_percent,
+    )
     city_candidate_totals = _build_city_candidate_totals(
         filtered_data,
         selected_cities,
         selected_candidates,
     )
+    projected_city_candidate_totals = _build_projection_totals(
+        city_candidate_totals,
+        projection_percent,
+    )
 
     render_source(source)
-    render_summary(comparison_data, year, state, turn, selected_cities, selected_candidates)
+    render_summary(
+        comparison_data,
+        year,
+        state,
+        turn,
+        selected_cities,
+        selected_candidates,
+        projected_total_by_candidate,
+        projection_percent,
+    )
     render_pdf_export(
         year=year,
         state=state,
@@ -200,8 +226,8 @@ def main() -> None:
         city_candidate_totals=city_candidate_totals,
         source=source,
     )
-    render_total_votes_chart(total_by_candidate, year, state, turn)
-    render_city_chart(city_candidate_totals, selected_cities)
+    render_total_votes_chart(projected_total_by_candidate, year, state, turn, projection_percent)
+    render_city_chart(projected_city_candidate_totals, selected_cities, projection_percent)
     render_data_table(comparison_data)
 
 
@@ -219,11 +245,15 @@ def render_summary(
     turn: int,
     selected_cities: list[str],
     selected_candidates: list[str],
+    projected_total_by_candidate: pd.DataFrame,
+    projection_percent: float,
 ) -> None:
     scope = f"{len(selected_cities)} cidade(s)" if selected_cities else "todas as cidades"
     st.caption(f"{year} - {state} - {turn} turno - {scope} - {len(selected_candidates)} candidato(s)")
 
     total_votes = int(data["votos"].sum())
+    projected_votes = int(projected_total_by_candidate["votos_projecao"].sum())
+    projected_total = int(projected_total_by_candidate["votos_total"].sum())
     cities_count = data["cidade"].nunique()
     candidates_count = data["deputado"].nunique()
     leader = (
@@ -234,10 +264,67 @@ def render_summary(
     leader_display = _shorten(leader)
 
     col_total, col_cities, col_deputies, col_winner = st.columns(4)
-    col_total.metric("Votos filtrados", f"{total_votes:,}".replace(",", "."))
+    if projection_percent > 0:
+        col_total.metric(
+            f"Votos filtrados + Projecao de {_format_percent(projection_percent)}",
+            _format_integer(projected_total),
+            delta=f"+{_format_integer(projected_votes)} projetados",
+        )
+    else:
+        col_total.metric("Votos filtrados", _format_integer(total_votes))
     col_cities.metric("Cidades", cities_count)
     col_deputies.metric("Candidatos", candidates_count)
     col_winner.metric("Maior votacao", leader_display)
+    render_projection_detail(projected_total_by_candidate, projection_percent)
+
+
+def render_projection_controls() -> float:
+    st.divider()
+    st.number_input(
+        "Projecao (%)",
+        min_value=0.0,
+        max_value=1000.0,
+        step=1.0,
+        key=PROJECTION_INPUT_KEY,
+    )
+
+    apply_button, clear_button = st.columns(2)
+    if apply_button.button("Aplicar projecao", width="stretch"):
+        st.session_state[PROJECTION_PERCENT_KEY] = _normalize_projection_percent(
+            st.session_state.get(PROJECTION_INPUT_KEY, 0.0)
+        )
+
+    if clear_button.button("Limpar", width="stretch"):
+        st.session_state[PROJECTION_PERCENT_KEY] = 0.0
+        st.session_state[PROJECTION_INPUT_KEY] = 0.0
+
+    projection_percent = _normalize_projection_percent(
+        st.session_state.get(PROJECTION_PERCENT_KEY, 0.0)
+    )
+    if projection_percent > 0:
+        st.caption(f"Projecao aplicada: {_format_percent(projection_percent)}")
+
+    return projection_percent
+
+
+def render_projection_detail(projected_total_by_candidate: pd.DataFrame, projection_percent: float) -> None:
+    if projection_percent <= 0:
+        return
+
+    detail = projected_total_by_candidate[
+        ["deputado", "votos_reais", "votos_projecao", "votos_total"]
+    ].rename(
+        columns={
+            "deputado": "candidato",
+            "votos_reais": "votos reais",
+            "votos_projecao": f"projecao {_format_percent(projection_percent)}",
+            "votos_total": "total projetado",
+        }
+    ).copy()
+    for column in ["votos reais", f"projecao {_format_percent(projection_percent)}", "total projetado"]:
+        detail[column] = detail[column].map(_format_integer)
+
+    st.dataframe(detail, width="stretch", hide_index=True)
 
 
 def render_pdf_export(
@@ -272,11 +359,29 @@ def render_pdf_export(
     )
 
 
-def render_total_votes_chart(total_by_candidate: pd.DataFrame, year: int, state: str, turn: int) -> None:
+def render_total_votes_chart(
+    total_by_candidate: pd.DataFrame,
+    year: int,
+    state: str,
+    turn: int,
+    projection_percent: float,
+) -> None:
     st.subheader("Comparativo de votos por candidato")
     chart_data = total_by_candidate.copy()
     chart_data["legenda"] = chart_data.apply(_format_candidate_label, axis=1)
     chart_data["votos_formatados"] = chart_data["votos"].map(_format_integer)
+
+    if projection_percent > 0:
+        fig = _build_projected_total_chart(chart_data, year, state, turn, projection_percent)
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key="total_votes_chart",
+            on_select="rerun",
+            selection_mode="points",
+        )
+        _render_selected_bar_total(event)
+        return
 
     fig = px.bar(
         chart_data,
@@ -313,10 +418,23 @@ def render_total_votes_chart(total_by_candidate: pd.DataFrame, year: int, state:
 def render_city_chart(
     city_data: pd.DataFrame,
     selected_cities: list[str],
+    projection_percent: float,
 ) -> None:
     st.subheader("Votos por cidade")
     chart_data = city_data.copy()
     chart_data["votos_formatados"] = chart_data["votos"].map(_format_integer)
+
+    if projection_percent > 0:
+        fig = _build_projected_city_chart(chart_data, selected_cities, projection_percent)
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key="city_votes_chart",
+            on_select="rerun",
+            selection_mode="points",
+        )
+        _render_selected_bar_total(event)
+        return
 
     fig = px.bar(
         chart_data,
@@ -364,6 +482,143 @@ def render_data_table(data: pd.DataFrame) -> None:
         .rename(columns={"deputado": "candidato"})
     )
     st.dataframe(table_data, width="stretch", hide_index=True)
+
+
+def _build_projected_total_chart(
+    chart_data: pd.DataFrame,
+    year: int,
+    state: str,
+    turn: int,
+    projection_percent: float,
+) -> go.Figure:
+    fig = go.Figure()
+    projection_label = f"Projecao {_format_percent(projection_percent)}"
+
+    for index, row in chart_data.reset_index(drop=True).iterrows():
+        color = COLOR_SEQUENCE[index % len(COLOR_SEQUENCE)]
+        customdata = [[
+            _format_integer(row["votos_total"]),
+            row["deputado"],
+            _format_integer(row["votos_reais"]),
+            _format_integer(row["votos_projecao"]),
+        ]]
+        fig.add_bar(
+            x=[row["legenda"]],
+            y=[row["votos_reais"]],
+            name=row["deputado"],
+            marker_color=color,
+            text=[_format_integer(row["votos_reais"])],
+            textposition="inside",
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{customdata[1]}</b><br>"
+                "Reais: %{customdata[2]} votos<br>"
+                f"{projection_label}: %{{customdata[3]}} votos<br>"
+                "Total: %{customdata[0]} votos<extra></extra>"
+            ),
+        )
+
+    projection_customdata = [
+        [
+            _format_integer(row["votos_total"]),
+            row["deputado"],
+            _format_integer(row["votos_reais"]),
+            _format_integer(row["votos_projecao"]),
+        ]
+        for _, row in chart_data.iterrows()
+    ]
+    fig.add_bar(
+        x=chart_data["legenda"],
+        y=chart_data["votos_projecao"],
+        name=projection_label,
+        marker_color=PROJECTION_COLOR,
+        text=chart_data["votos_projecao"].map(_format_integer),
+        textposition="outside",
+        customdata=projection_customdata,
+        hovertemplate=(
+            "<b>%{customdata[1]}</b><br>"
+            "Reais: %{customdata[2]} votos<br>"
+            f"{projection_label}: %{{customdata[3]}} votos<br>"
+            "Total: %{customdata[0]} votos<extra></extra>"
+        ),
+    )
+    fig.update_layout(
+        barmode="stack",
+        title=f"Votos totais em {state} - {year} - {turn} turno",
+        margin={"l": 24, "r": 24, "t": 56, "b": 24},
+        xaxis_title=None,
+        yaxis_title="Votos",
+        legend_title_text="Camada",
+    )
+    return fig
+
+
+def _build_projected_city_chart(
+    chart_data: pd.DataFrame,
+    selected_cities: list[str],
+    projection_percent: float,
+) -> go.Figure:
+    fig = go.Figure()
+    projection_label = f"Projecao {_format_percent(projection_percent)}"
+    candidates = chart_data["deputado"].drop_duplicates().tolist()
+
+    for index, candidate in enumerate(candidates):
+        candidate_data = chart_data[chart_data["deputado"] == candidate].copy()
+        color = COLOR_SEQUENCE[index % len(COLOR_SEQUENCE)]
+        customdata = [
+            [
+                _format_integer(row["votos_total"]),
+                row["deputado"],
+                _format_integer(row["votos_reais"]),
+                _format_integer(row["votos_projecao"]),
+            ]
+            for _, row in candidate_data.iterrows()
+        ]
+
+        fig.add_bar(
+            x=candidate_data["cidade"],
+            y=candidate_data["votos_reais"],
+            name=candidate,
+            marker_color=color,
+            offsetgroup=candidate,
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{customdata[1]}</b><br>"
+                "Cidade: %{x}<br>"
+                "Reais: %{customdata[2]} votos<br>"
+                f"{projection_label}: %{{customdata[3]}} votos<br>"
+                "Total: %{customdata[0]} votos<extra></extra>"
+            ),
+        )
+        fig.add_bar(
+            x=candidate_data["cidade"],
+            y=candidate_data["votos_projecao"],
+            name=projection_label,
+            marker_color=PROJECTION_COLOR,
+            offsetgroup=candidate,
+            legendgroup="projection",
+            showlegend=index == 0,
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{customdata[1]}</b><br>"
+                "Cidade: %{x}<br>"
+                "Reais: %{customdata[2]} votos<br>"
+                f"{projection_label}: %{{customdata[3]}} votos<br>"
+                "Total: %{customdata[0]} votos<extra></extra>"
+            ),
+        )
+
+    fig.update_layout(
+        barmode="relative",
+        title="Distribuicao de votos nas cidades selecionadas"
+        if selected_cities
+        else "Distribuicao de votos por cidade",
+        margin={"l": 24, "r": 24, "t": 56, "b": 24},
+        xaxis_title=None,
+        yaxis_title="Votos",
+        legend_title_text="Candidato",
+    )
+    return fig
 
 
 def _format_candidate_label(row: pd.Series) -> str:
@@ -430,6 +685,7 @@ def _read_query_filters() -> dict[str, object]:
         "position": st.query_params.get(QUERY_POSITION_KEY),
         "cities": st.query_params.get_all(QUERY_CITIES_KEY),
         "candidates": st.query_params.get_all(QUERY_CANDIDATES_KEY),
+        "projection": _parse_float(st.query_params.get(QUERY_PROJECTION_KEY)),
     }
 
 
@@ -441,6 +697,7 @@ def _update_filter_query_params(
     position: str,
     selected_cities: list[str],
     selected_candidates: list[str],
+    projection_percent: float,
 ) -> None:
     expected_params = {
         QUERY_YEAR_KEY: str(year),
@@ -449,6 +706,7 @@ def _update_filter_query_params(
         QUERY_POSITION_KEY: position,
         QUERY_CITIES_KEY: selected_cities,
         QUERY_CANDIDATES_KEY: selected_candidates,
+        QUERY_PROJECTION_KEY: _format_query_float(projection_percent),
     }
     expected_signature = _build_query_signature(
         year,
@@ -506,6 +764,13 @@ def _build_query_signature(
 def _parse_int(value: object) -> int | None:
     try:
         return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_float(value: object) -> float | None:
+    try:
+        return float(str(value).replace(",", ".")) if value is not None else None
     except (TypeError, ValueError):
         return None
 
@@ -576,6 +841,37 @@ def _build_city_candidate_totals(
     )
 
 
+def _sync_projection_state(query_projection: object) -> None:
+    query_projection_percent = _normalize_projection_percent(query_projection)
+    query_token = _format_query_float(query_projection_percent)
+
+    if (
+        PROJECTION_PERCENT_KEY not in st.session_state
+        or query_token != st.session_state.get(LAST_WRITTEN_PROJECTION_QUERY_KEY)
+    ):
+        st.session_state[PROJECTION_PERCENT_KEY] = query_projection_percent
+        st.session_state[PROJECTION_INPUT_KEY] = query_projection_percent
+        st.session_state[LAST_WRITTEN_PROJECTION_QUERY_KEY] = query_token
+
+
+def _build_projection_totals(data: pd.DataFrame, projection_percent: float) -> pd.DataFrame:
+    projected = data.copy()
+    projected["votos_reais"] = projected["votos"].astype(int)
+    projected["votos_projecao"] = _project_vote_series(
+        projected["votos_reais"],
+        projection_percent,
+    )
+    projected["votos_total"] = projected["votos_reais"] + projected["votos_projecao"]
+    return projected
+
+
+def _project_vote_series(votes: pd.Series, projection_percent: float) -> pd.Series:
+    if projection_percent <= 0:
+        return pd.Series(0, index=votes.index, dtype=int)
+
+    return (votes.astype(float) * (projection_percent / 100)).round().astype(int)
+
+
 def _render_selected_bar_total(event: object) -> None:
     points = _get_selected_points(event)
     if not points:
@@ -619,6 +915,27 @@ def _shorten(value: str, max_length: int = 28) -> str:
 
 def _format_integer(value: int) -> str:
     return f"{int(value):,}".replace(",", ".")
+
+
+def _format_percent(value: float) -> str:
+    normalized = _normalize_projection_percent(value)
+    if normalized.is_integer():
+        return f"{int(normalized)}%"
+    return f"{normalized:.2f}".rstrip("0").rstrip(".").replace(".", ",") + "%"
+
+
+def _format_query_float(value: float) -> str:
+    normalized = _normalize_projection_percent(value)
+    if normalized.is_integer():
+        return str(int(normalized))
+    return f"{normalized:.2f}".rstrip("0").rstrip(".")
+
+
+def _normalize_projection_percent(value: object) -> float:
+    parsed_value = _parse_float(value)
+    if parsed_value is None or parsed_value < 0:
+        return 0.0
+    return min(parsed_value, 1000.0)
 
 
 def _default_position(position_options: list[str]) -> str:
