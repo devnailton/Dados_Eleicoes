@@ -15,6 +15,7 @@ Sistema Web em Python com Streamlit para consultar boletins de urna oficiais do 
 - Exportacao do relatorio filtrado em PDF com totais nas barras e nas tabelas.
 - Tabela com os votos calculados a partir dos boletins de urna.
 - Substituicao automatica dos arquivos existentes de dados baixados/agregados.
+- Filtros sincronizados com a URL para compartilhar links diretos.
 - Execucao local via Docker.
 
 ## Como rodar com Docker
@@ -55,6 +56,16 @@ Anos suportados nesta versao:
 - 2018
 
 Os anos 2014 e 2016 tambem existem no portal, mas usam arquivos TXT sem cabecalho e exigem um parser proprio.
+
+## Links com filtros
+
+Os filtros ficam sincronizados com a URL. Depois de selecionar ano, estado, turno, cargo, cidades e candidatos, copie a URL do navegador para compartilhar o mesmo recorte.
+
+Exemplo:
+
+```text
+/?ano=2022&estado=AC&turno=1&cargo=DEPUTADO%20FEDERAL&cidades=Rio%20Branco&candidatos=SOCORRO%20NERI
+```
 
 ## Cache
 

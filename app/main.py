@@ -22,8 +22,15 @@ st.set_page_config(
 
 COLOR_SEQUENCE = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#f97316"]
 FILTER_CONTEXT_KEY = "filter_context"
+QUERY_SELECTION_SIGNATURE_KEY = "query_selection_signature"
 SELECTED_CITIES_KEY = "selected_cities"
 SELECTED_CANDIDATES_KEY = "selected_candidates"
+QUERY_YEAR_KEY = "ano"
+QUERY_STATE_KEY = "estado"
+QUERY_TURN_KEY = "turno"
+QUERY_POSITION_KEY = "cargo"
+QUERY_CITIES_KEY = "cidades"
+QUERY_CANDIDATES_KEY = "candidatos"
 
 
 @st.cache_data(show_spinner=False)
@@ -49,11 +56,13 @@ def cached_load_tse_data(year: int, state: str, turn: int) -> tuple[pd.DataFrame
 def main() -> None:
     apply_theme()
     st.title("Dados de Eleicoes")
+    query_filters = _read_query_filters()
 
     with st.sidebar:
         st.header("Filtros")
         years = list_available_years()
-        year = st.selectbox("Ano da eleicao", years, index=years.index(2022))
+        default_year = _first_valid_option(query_filters["year"], years, 2022)
+        year = st.selectbox("Ano da eleicao", years, index=years.index(default_year))
 
     try:
         states = cached_list_states(year)
@@ -61,7 +70,7 @@ def main() -> None:
         st.error(str(error))
         st.stop()
 
-    default_state = states[0]
+    default_state = _first_valid_option(query_filters["state"], states, states[0])
 
     with st.sidebar:
         state = st.selectbox("Estado", states, index=states.index(default_state))
@@ -73,9 +82,11 @@ def main() -> None:
         st.stop()
 
     with st.sidebar:
+        default_turn = _first_valid_option(query_filters["turn"], turns, turns[0])
         turn = st.selectbox(
             "Turno",
             turns,
+            index=turns.index(default_turn),
             format_func=lambda value: f"{value} turno",
         )
 
@@ -88,7 +99,11 @@ def main() -> None:
 
     with st.sidebar:
         position_options = sorted(data["cargo"].unique())
-        default_position = _default_position(position_options)
+        default_position = _first_valid_option(
+            query_filters["position"],
+            position_options,
+            _default_position(position_options),
+        )
         selected_position = st.selectbox(
             "Cargo",
             position_options,
@@ -104,10 +119,18 @@ def main() -> None:
         .tolist()
     )
     filter_context = (year, state, turn, selected_position)
-    _sync_filter_state(filter_context, state_data, candidate_options)
 
     with st.sidebar:
         city_options = sorted(state_data["cidade"].unique())
+        query_cities = _valid_options(query_filters["cities"], city_options)
+        query_candidates = _valid_options(query_filters["candidates"], candidate_options, max_items=5)
+        _sync_filter_state(
+            filter_context,
+            state_data,
+            candidate_options,
+            default_cities=query_cities,
+            default_candidates=query_candidates,
+        )
         _prune_session_selection(SELECTED_CITIES_KEY, city_options)
         selected_cities = st.multiselect(
             "Cidades",
@@ -129,6 +152,15 @@ def main() -> None:
             max_selections=5,
             placeholder="Selecione ate 5 candidatos",
         )
+
+    _update_filter_query_params(
+        year=year,
+        state=state,
+        turn=turn,
+        position=selected_position,
+        selected_cities=selected_cities,
+        selected_candidates=selected_candidates,
+    )
 
     if not selected_candidates:
         st.info("Selecione pelo menos um candidato para gerar os graficos.")
@@ -335,13 +367,23 @@ def _sync_filter_state(
     filter_context: tuple[int, str, int, str],
     state_data: pd.DataFrame,
     candidate_options: list[str],
+    default_cities: list[str],
+    default_candidates: list[str],
 ) -> None:
-    if st.session_state.get(FILTER_CONTEXT_KEY) == filter_context:
+    query_selection_signature = (tuple(default_cities), tuple(default_candidates))
+    if (
+        st.session_state.get(FILTER_CONTEXT_KEY) == filter_context
+        and st.session_state.get(QUERY_SELECTION_SIGNATURE_KEY) == query_selection_signature
+    ):
         return
 
     st.session_state[FILTER_CONTEXT_KEY] = filter_context
-    st.session_state[SELECTED_CITIES_KEY] = []
-    st.session_state[SELECTED_CANDIDATES_KEY] = _top_candidates(state_data, candidate_options)
+    st.session_state[QUERY_SELECTION_SIGNATURE_KEY] = query_selection_signature
+    st.session_state[SELECTED_CITIES_KEY] = default_cities
+    st.session_state[SELECTED_CANDIDATES_KEY] = default_candidates or _top_candidates(
+        state_data,
+        candidate_options,
+    )
 
 
 def _top_candidates(state_data: pd.DataFrame, candidate_options: list[str]) -> list[str]:
@@ -365,6 +407,76 @@ def _prune_session_selection(key: str, options: list[str], max_items: int | None
         pruned_selection = pruned_selection[:max_items]
 
     st.session_state[key] = pruned_selection
+
+
+def _read_query_filters() -> dict[str, object]:
+    return {
+        "year": _parse_int(st.query_params.get(QUERY_YEAR_KEY)),
+        "state": st.query_params.get(QUERY_STATE_KEY),
+        "turn": _parse_int(st.query_params.get(QUERY_TURN_KEY)),
+        "position": st.query_params.get(QUERY_POSITION_KEY),
+        "cities": st.query_params.get_all(QUERY_CITIES_KEY),
+        "candidates": st.query_params.get_all(QUERY_CANDIDATES_KEY),
+    }
+
+
+def _update_filter_query_params(
+    *,
+    year: int,
+    state: str,
+    turn: int,
+    position: str,
+    selected_cities: list[str],
+    selected_candidates: list[str],
+) -> None:
+    expected_params = {
+        QUERY_YEAR_KEY: str(year),
+        QUERY_STATE_KEY: state,
+        QUERY_TURN_KEY: str(turn),
+        QUERY_POSITION_KEY: position,
+        QUERY_CITIES_KEY: selected_cities,
+        QUERY_CANDIDATES_KEY: selected_candidates,
+    }
+
+    if _query_params_match(expected_params):
+        return
+
+    st.query_params.update(expected_params)
+
+
+def _query_params_match(expected_params: dict[str, str | list[str]]) -> bool:
+    for key, expected_value in expected_params.items():
+        current_value = st.query_params.get_all(key)
+        expected_values = expected_value if isinstance(expected_value, list) else [expected_value]
+        if current_value != [str(value) for value in expected_values]:
+            return False
+
+    return True
+
+
+def _parse_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_valid_option(value: object, options: list[object], fallback: object) -> object:
+    return value if value in options else fallback
+
+
+def _valid_options(values: list[str], options: list[str], max_items: int | None = None) -> list[str]:
+    option_set = set(options)
+    valid_values = []
+
+    for value in values:
+        if value in option_set and value not in valid_values:
+            valid_values.append(value)
+
+    if max_items is not None:
+        return valid_values[:max_items]
+
+    return valid_values
 
 
 def _build_selected_candidate_totals(
