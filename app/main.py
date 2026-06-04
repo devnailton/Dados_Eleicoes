@@ -315,14 +315,8 @@ def render_projection_controls() -> tuple[float, str]:
     st.session_state[PROJECTION_SCOPE_KEY] = PROJECTION_SCOPE_OPTIONS[selected_scope_label]
 
     apply_button, clear_button = st.columns(2)
-    if apply_button.button("Aplicar projecao", width="stretch"):
-        st.session_state[PROJECTION_PERCENT_KEY] = _normalize_projection_percent(
-            st.session_state.get(PROJECTION_INPUT_KEY, 0.0)
-        )
-
-    if clear_button.button("Limpar", width="stretch"):
-        st.session_state[PROJECTION_PERCENT_KEY] = 0.0
-        st.session_state[PROJECTION_INPUT_KEY] = 0.0
+    apply_button.button("Aplicar projecao", width="stretch", on_click=_apply_projection)
+    clear_button.button("Limpar", width="stretch", on_click=_clear_projection)
 
     projection_percent = _normalize_projection_percent(
         st.session_state.get(PROJECTION_PERCENT_KEY, 0.0)
@@ -334,6 +328,17 @@ def render_projection_controls() -> tuple[float, str]:
         )
 
     return projection_percent, st.session_state[PROJECTION_SCOPE_KEY]
+
+
+def _apply_projection() -> None:
+    st.session_state[PROJECTION_PERCENT_KEY] = _normalize_projection_percent(
+        st.session_state.get(PROJECTION_INPUT_KEY, 0.0)
+    )
+
+
+def _clear_projection() -> None:
+    st.session_state[PROJECTION_PERCENT_KEY] = 0.0
+    st.session_state[PROJECTION_INPUT_KEY] = 0.0
 
 
 def render_projection_detail(projected_total_by_candidate: pd.DataFrame, projection_percent: float) -> None:
