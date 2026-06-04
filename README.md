@@ -14,6 +14,7 @@ Sistema Web em Python com Streamlit para consultar boletins de urna oficiais do 
 - Grafico de barras com uma cor diferente para cada deputado/candidato.
 - Exportacao do relatorio filtrado em PDF com totais nas barras e nas tabelas.
 - Campo de projecao percentual para simular aumento de votos dos candidatos selecionados.
+- Modos de projecao: cidades e total, somente cidades, ou somente total.
 - Tabela com os votos calculados a partir dos boletins de urna.
 - Substituicao automatica dos arquivos existentes de dados baixados/agregados.
 - Filtros sincronizados com a URL para compartilhar links diretos.
@@ -60,13 +61,19 @@ Os anos 2014 e 2016 tambem existem no portal, mas usam arquivos TXT sem cabecalh
 
 ## Links com filtros
 
-Os filtros ficam sincronizados com a URL. Depois de selecionar ano, estado, turno, cargo, cidades, candidatos e projecao, copie a URL do navegador para compartilhar o mesmo recorte.
+Os filtros ficam sincronizados com a URL. Depois de selecionar ano, estado, turno, cargo, cidades, candidatos, projecao e modo de projecao, copie a URL do navegador para compartilhar o mesmo recorte.
 
 Exemplo:
 
 ```text
-/?ano=2022&estado=AC&turno=1&cargo=DEPUTADO%20FEDERAL&cidades=Rio%20Branco&candidatos=SOCORRO%20NERI&projecao=30
+/?ano=2022&estado=AC&turno=1&cargo=DEPUTADO%20FEDERAL&cidades=Rio%20Branco&candidatos=SOCORRO%20NERI&projecao=30&projecao_em=ambos
 ```
+
+Valores aceitos para `projecao_em`:
+
+- `ambos`
+- `cidades`
+- `total`
 
 ## Cache
 

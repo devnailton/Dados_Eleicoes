@@ -30,6 +30,7 @@ SELECTED_CITIES_KEY = "selected_cities"
 SELECTED_CANDIDATES_KEY = "selected_candidates"
 PROJECTION_INPUT_KEY = "projection_input"
 PROJECTION_PERCENT_KEY = "projection_percent"
+PROJECTION_SCOPE_KEY = "projection_scope"
 LAST_WRITTEN_PROJECTION_QUERY_KEY = "last_written_projection_query"
 QUERY_YEAR_KEY = "ano"
 QUERY_STATE_KEY = "estado"
@@ -38,6 +39,12 @@ QUERY_POSITION_KEY = "cargo"
 QUERY_CITIES_KEY = "cidades"
 QUERY_CANDIDATES_KEY = "candidatos"
 QUERY_PROJECTION_KEY = "projecao"
+QUERY_PROJECTION_SCOPE_KEY = "projecao_em"
+PROJECTION_SCOPE_OPTIONS = {
+    "Cidades e total": "ambos",
+    "Somente cidades": "cidades",
+    "Somente total": "total",
+}
 
 
 @st.cache_data(show_spinner=False)
@@ -64,7 +71,7 @@ def main() -> None:
     apply_theme()
     st.title("Dados de Eleicoes")
     query_filters = _read_query_filters()
-    _sync_projection_state(query_filters["projection"])
+    _sync_projection_state(query_filters["projection"], query_filters["projection_scope"])
 
     with st.sidebar:
         st.header("Filtros")
@@ -168,7 +175,10 @@ def main() -> None:
             max_selections=5,
             placeholder="Selecione ate 5 candidatos",
         )
-        projection_percent = render_projection_controls()
+        projection_percent, projection_scope = render_projection_controls()
+
+    total_projection_percent = projection_percent if _projects_total(projection_scope) else 0.0
+    city_projection_percent = projection_percent if _projects_cities(projection_scope) else 0.0
 
     _update_filter_query_params(
         year=year,
@@ -178,6 +188,7 @@ def main() -> None:
         selected_cities=selected_cities,
         selected_candidates=selected_candidates,
         projection_percent=projection_percent,
+        projection_scope=projection_scope,
     )
 
     if not selected_candidates:
@@ -192,7 +203,7 @@ def main() -> None:
     )
     projected_total_by_candidate = _build_projection_totals(
         total_by_candidate,
-        projection_percent,
+        total_projection_percent,
     )
     city_candidate_totals = _build_city_candidate_totals(
         filtered_data,
@@ -201,7 +212,12 @@ def main() -> None:
     )
     projected_city_candidate_totals = _build_projection_totals(
         city_candidate_totals,
-        projection_percent,
+        city_projection_percent,
+    )
+    summary_projection_data = (
+        projected_total_by_candidate
+        if _projects_total(projection_scope)
+        else _aggregate_projected_city_totals(projected_city_candidate_totals, total_by_candidate)
     )
 
     render_source(source)
@@ -212,8 +228,9 @@ def main() -> None:
         turn,
         selected_cities,
         selected_candidates,
-        projected_total_by_candidate,
+        summary_projection_data,
         projection_percent,
+        projection_scope,
     )
     render_pdf_export(
         year=year,
@@ -226,8 +243,8 @@ def main() -> None:
         city_candidate_totals=city_candidate_totals,
         source=source,
     )
-    render_total_votes_chart(projected_total_by_candidate, year, state, turn, projection_percent)
-    render_city_chart(projected_city_candidate_totals, selected_cities, projection_percent)
+    render_total_votes_chart(projected_total_by_candidate, year, state, turn, total_projection_percent)
+    render_city_chart(projected_city_candidate_totals, selected_cities, city_projection_percent)
     render_data_table(comparison_data)
 
 
@@ -247,6 +264,7 @@ def render_summary(
     selected_candidates: list[str],
     projected_total_by_candidate: pd.DataFrame,
     projection_percent: float,
+    projection_scope: str,
 ) -> None:
     scope = f"{len(selected_cities)} cidade(s)" if selected_cities else "todas as cidades"
     st.caption(f"{year} - {state} - {turn} turno - {scope} - {len(selected_candidates)} candidato(s)")
@@ -275,10 +293,12 @@ def render_summary(
     col_cities.metric("Cidades", cities_count)
     col_deputies.metric("Candidatos", candidates_count)
     col_winner.metric("Maior votacao", leader_display)
+    if projection_percent > 0:
+        st.caption(f"Base da projecao: {_projection_scope_label(projection_scope)}")
     render_projection_detail(projected_total_by_candidate, projection_percent)
 
 
-def render_projection_controls() -> float:
+def render_projection_controls() -> tuple[float, str]:
     st.divider()
     st.number_input(
         "Projecao (%)",
@@ -287,6 +307,12 @@ def render_projection_controls() -> float:
         step=1.0,
         key=PROJECTION_INPUT_KEY,
     )
+    selected_scope_label = st.selectbox(
+        "Aplicar projecao em",
+        options=list(PROJECTION_SCOPE_OPTIONS.keys()),
+        index=_projection_scope_index(st.session_state.get(PROJECTION_SCOPE_KEY, "ambos")),
+    )
+    st.session_state[PROJECTION_SCOPE_KEY] = PROJECTION_SCOPE_OPTIONS[selected_scope_label]
 
     apply_button, clear_button = st.columns(2)
     if apply_button.button("Aplicar projecao", width="stretch"):
@@ -302,9 +328,12 @@ def render_projection_controls() -> float:
         st.session_state.get(PROJECTION_PERCENT_KEY, 0.0)
     )
     if projection_percent > 0:
-        st.caption(f"Projecao aplicada: {_format_percent(projection_percent)}")
+        st.caption(
+            f"Projecao aplicada: {_format_percent(projection_percent)} "
+            f"em {_projection_scope_label(st.session_state[PROJECTION_SCOPE_KEY]).lower()}"
+        )
 
-    return projection_percent
+    return projection_percent, st.session_state[PROJECTION_SCOPE_KEY]
 
 
 def render_projection_detail(projected_total_by_candidate: pd.DataFrame, projection_percent: float) -> None:
@@ -434,6 +463,7 @@ def render_city_chart(
             selection_mode="points",
         )
         _render_selected_bar_total(event)
+        render_city_projection_detail(chart_data, projection_percent)
         return
 
     fig = px.bar(
@@ -469,6 +499,23 @@ def render_city_chart(
         selection_mode="points",
     )
     _render_selected_bar_total(event)
+
+
+def render_city_projection_detail(city_data: pd.DataFrame, projection_percent: float) -> None:
+    detail = city_data[
+        ["cidade", "deputado", "votos_reais", "votos_projecao", "votos_total"]
+    ].rename(
+        columns={
+            "deputado": "candidato",
+            "votos_reais": "votos reais",
+            "votos_projecao": f"projecao {_format_percent(projection_percent)}",
+            "votos_total": "total projetado",
+        }
+    ).copy()
+    for column in ["votos reais", f"projecao {_format_percent(projection_percent)}", "total projetado"]:
+        detail[column] = detail[column].map(_format_integer)
+
+    st.dataframe(detail, width="stretch", hide_index=True)
 
 
 def render_data_table(data: pd.DataFrame) -> None:
@@ -595,6 +642,8 @@ def _build_projected_city_chart(
             y=candidate_data["votos_projecao"],
             name=projection_label,
             marker_color=PROJECTION_COLOR,
+            text=candidate_data["votos_projecao"].map(_format_integer),
+            textposition="outside",
             offsetgroup=candidate,
             legendgroup="projection",
             showlegend=index == 0,
@@ -686,6 +735,7 @@ def _read_query_filters() -> dict[str, object]:
         "cities": st.query_params.get_all(QUERY_CITIES_KEY),
         "candidates": st.query_params.get_all(QUERY_CANDIDATES_KEY),
         "projection": _parse_float(st.query_params.get(QUERY_PROJECTION_KEY)),
+        "projection_scope": _valid_projection_scope(st.query_params.get(QUERY_PROJECTION_SCOPE_KEY)),
     }
 
 
@@ -698,6 +748,7 @@ def _update_filter_query_params(
     selected_cities: list[str],
     selected_candidates: list[str],
     projection_percent: float,
+    projection_scope: str,
 ) -> None:
     expected_params = {
         QUERY_YEAR_KEY: str(year),
@@ -707,6 +758,7 @@ def _update_filter_query_params(
         QUERY_CITIES_KEY: selected_cities,
         QUERY_CANDIDATES_KEY: selected_candidates,
         QUERY_PROJECTION_KEY: _format_query_float(projection_percent),
+        QUERY_PROJECTION_SCOPE_KEY: _valid_projection_scope(projection_scope),
     }
     expected_signature = _build_query_signature(
         year,
@@ -718,6 +770,9 @@ def _update_filter_query_params(
     )
 
     st.session_state[LAST_WRITTEN_QUERY_SIGNATURE_KEY] = expected_signature
+    st.session_state[LAST_WRITTEN_PROJECTION_QUERY_KEY] = (
+        f"{_format_query_float(projection_percent)}:{_valid_projection_scope(projection_scope)}"
+    )
 
     if _query_params_match(expected_params):
         st.session_state[LAST_APPLIED_QUERY_SIGNATURE_KEY] = expected_signature
@@ -841,9 +896,10 @@ def _build_city_candidate_totals(
     )
 
 
-def _sync_projection_state(query_projection: object) -> None:
+def _sync_projection_state(query_projection: object, query_projection_scope: object) -> None:
     query_projection_percent = _normalize_projection_percent(query_projection)
-    query_token = _format_query_float(query_projection_percent)
+    query_projection_scope = _valid_projection_scope(query_projection_scope)
+    query_token = f"{_format_query_float(query_projection_percent)}:{query_projection_scope}"
 
     if (
         PROJECTION_PERCENT_KEY not in st.session_state
@@ -851,6 +907,7 @@ def _sync_projection_state(query_projection: object) -> None:
     ):
         st.session_state[PROJECTION_PERCENT_KEY] = query_projection_percent
         st.session_state[PROJECTION_INPUT_KEY] = query_projection_percent
+        st.session_state[PROJECTION_SCOPE_KEY] = query_projection_scope
         st.session_state[LAST_WRITTEN_PROJECTION_QUERY_KEY] = query_token
 
 
@@ -863,6 +920,22 @@ def _build_projection_totals(data: pd.DataFrame, projection_percent: float) -> p
     )
     projected["votos_total"] = projected["votos_reais"] + projected["votos_projecao"]
     return projected
+
+
+def _aggregate_projected_city_totals(
+    projected_city_data: pd.DataFrame,
+    total_by_candidate: pd.DataFrame,
+) -> pd.DataFrame:
+    city_totals = (
+        projected_city_data.groupby("deputado", as_index=False)[
+            ["votos_reais", "votos_projecao", "votos_total"]
+        ]
+        .sum()
+    )
+    candidate_parties = total_by_candidate[["deputado", "partido", "votos"]]
+    return candidate_parties.merge(city_totals, on="deputado", how="left").fillna(
+        {"votos_reais": 0, "votos_projecao": 0, "votos_total": 0}
+    )
 
 
 def _project_vote_series(votes: pd.Series, projection_percent: float) -> pd.Series:
@@ -929,6 +1002,35 @@ def _format_query_float(value: float) -> str:
     if normalized.is_integer():
         return str(int(normalized))
     return f"{normalized:.2f}".rstrip("0").rstrip(".")
+
+
+def _projects_cities(projection_scope: str) -> bool:
+    return _valid_projection_scope(projection_scope) in {"ambos", "cidades"}
+
+
+def _projects_total(projection_scope: str) -> bool:
+    return _valid_projection_scope(projection_scope) in {"ambos", "total"}
+
+
+def _projection_scope_label(projection_scope: str) -> str:
+    normalized = _valid_projection_scope(projection_scope)
+    for label, value in PROJECTION_SCOPE_OPTIONS.items():
+        if value == normalized:
+            return label
+    return "Cidades e total"
+
+
+def _projection_scope_index(projection_scope: str) -> int:
+    normalized = _valid_projection_scope(projection_scope)
+    options = list(PROJECTION_SCOPE_OPTIONS.values())
+    return options.index(normalized) if normalized in options else 0
+
+
+def _valid_projection_scope(value: object) -> str:
+    text = str(value or "ambos").strip().lower()
+    if text in PROJECTION_SCOPE_OPTIONS.values():
+        return text
+    return "ambos"
 
 
 def _normalize_projection_percent(value: object) -> float:
